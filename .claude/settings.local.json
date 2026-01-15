@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo:*)",
+      "Bash(python3:*)",
+      "Bash(TMPDIR=/tmp python3:*)"
+    ]
+  }
+}
