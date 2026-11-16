@@ -1,163 +1,83 @@
-# GRPO for Arithmetic
+# GRPO for arithmetic
 
-Teaching language models basic arithmetic using Group Relative Policy Optimization.
+Group Relative Policy Optimization (GRPO) implemented from scratch in PyTorch and run end to end on a CPU: a small transformer learns two-digit addition and subtraction from a 0/1 reward.
 
-## What is GRPO?
+## The objective
 
-GRPO is a reinforcement learning algorithm that works by generating multiple responses per prompt and comparing them. Instead of needing a reward model or value network, it just looks at which responses are better than average.
-
-**How it works:**
-1. Generate k responses for each prompt
-2. Score them (right/wrong for arithmetic)
-3. Calculate advantages by comparing to the group mean
-4. Update: boost probability of above-average responses, reduce below-average ones
-
-**Why use it:**
-- Simpler than PPO (no value network or clipping)
-- Works well when there's a clear right/wrong answer
-- More stable than vanilla policy gradients
-- Efficient - learns from multiple attempts per question
-
-**Core idea:**
-```
-loss = -1/k * Σ(advantage_i * log_prob(response_i))
-
-where advantage = reward - mean(rewards)
-```
-
-## Resources
-
-- [Why GRPO is Important and How It Works](https://ghost.oxen.ai/why-grpo-is-important-and-how-it-works/) - Great overview
-- [DeepSeek R1 Paper](https://arxiv.org/abs/2501.12948) - Section 3 covers GRPO in detail
-- [Hugging Face TRL GRPO Implementation](https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py)
-- [OpenAI on RLHF variants](https://spinningup.openai.com/en/latest/algorithms/ppo.html) - Background on policy gradients
-- [Reinforcement Learning from Human Feedback (RLHF)](https://huggingface.co/blog/rlhf) - Context on why these methods matter
-
-## Project Structure
+GRPO comes from [DeepSeekMath](https://arxiv.org/abs/2402.03300) (Shao et al., 2024, section 4.1). For each prompt `q`, sample a group of `G` completions from the old policy and score each one. Then maximise
 
 ```
-grpo-arithmetic/
-├── train.py          # Main GRPO training loop
-├── data.py           # Arithmetic problem generator
-└── README.md
+J = E_q E_{o_i ~ pi_old}  (1/G) sum_i (1/|o_i|) sum_t [
+        min( rho_it * A_i,  clip(rho_it, 1 - eps, 1 + eps) * A_i )  -  beta * KL_it
+    ]
+
+rho_it = pi_theta(o_it | q, o_i,<t) / pi_old(o_it | q, o_i,<t)
+A_i    = (r_i - mean(r)) / std(r)
+KL_it  = pi_ref/pi_theta - log(pi_ref/pi_theta) - 1
 ```
 
-## Quick Start
+The pieces, and where each lives in `grpo.py`:
+
+| Piece | What it does | Function |
+| --- | --- | --- |
+| Group-relative advantage | Replaces PPO's learned value function with the group's own mean and std. A group whose rewards are all equal has zero advantage. | `group_advantages` |
+| Probability ratio and clip | Lets one batch of rollouts be reused for several gradient steps without the policy moving far from the one that sampled them. | `grpo_loss` |
+| KL penalty | Keeps the policy near a frozen reference policy. Uses the paper's per-token estimator, which is non-negative. | `kl_estimator` |
+| Length normalisation | Averages over a completion's tokens, so long completions do not dominate. | `grpo_loss` |
+
+`tests/test_grpo.py` checks each piece, including that the first gradient step (ratio = 1) equals the plain policy gradient with normalised advantages.
+
+## What changed from the first version
+
+The first version of this repo called its loss GRPO, but it was REINFORCE with a group-mean baseline: `loss = -mean((r_i - mean(r)) * log pi(o_i))`. It had no probability ratio, no clip, no KL penalty and no std normalisation, and it took one gradient step per group. That loss is kept as `reinforce_loss` and used as the baseline below.
+
+## Experiment
+
+- **Task:** all 20,000 problems `a + b` and `a - b` with `a, b` in 0..99, split once into 1,500 warm-start, 16,500 RL and 2,000 test problems.
+- **Model:** a 3-layer, 96-dimensional decoder-only transformer over 16 character tokens (`model.py`).
+- **Warm start:** 600 supervised steps on the 1,500 solved problems. This leaves the policy right some of the time, which RL from a 0/1 reward needs.
+- **RL:** 400 iterations of 64 prompts with 8 completions each. The policy sees only whether each sampled answer was exactly right.
+- **Metric:** greedy exact-match accuracy on the 2,000 held-out problems.
+
+| Objective | Seed | Test acc after warm start | Test acc after RL | Gain |
+| --- | --- | --- | --- | --- |
+| GRPO | 0 | 0.276 | 0.634 | +0.358 |
+| GRPO | 1 | 0.113 | 0.340 | +0.227 |
+| GRPO | 2 | 0.200 | 0.428 | +0.228 |
+| REINFORCE baseline | 0 | 0.276 | 0.543 | +0.267 |
+| REINFORCE baseline | 1 | 0.113 | 0.243 | +0.130 |
+| REINFORCE baseline | 2 | 0.200 | 0.335 | +0.135 |
+
+Mean gain: GRPO +0.271, REINFORCE baseline +0.177. Per-run histories are in `results/`.
+
+### What this does and does not show
+
+- Both objectives improve held-out accuracy from a 0/1 reward on problems whose answers the policy never sees.
+- GRPO gained more on all three seeds, from the same rollouts.
+- The comparison is not controlled for compute. GRPO takes 4 gradient steps per batch of rollouts and the baseline takes 1, so the gap may be mostly sample reuse. The clip is what makes that reuse safe, but this experiment does not separate the two.
+- Three seeds is too few for a confidence interval, and the warm start varies a lot between seeds (0.11 to 0.28).
+- The KL penalty is weak at `beta = 0.04`: the estimator keeps rising through training (about 0.7 by iteration 400). No run tests whether it matters.
+- The learning rate and warm-start size were picked from 100-iteration pilot runs on seed 0.
+
+## Run it
 
 ```bash
-# Install dependencies
-pip install transformers torch numpy
-
-# Run training
-python train.py
+pip install -r requirements.txt
+python -m pytest tests                      # 9 checks of the objective
+python train.py --objective grpo --seed 0   # about 6 minutes on one CPU core
+python train.py --objective reinforce --seed 0
+python summarize.py                         # table from results/*.json
 ```
 
-This loads DistilGPT-2, generates 10 problems, trains for 2 epochs, and saves the model.
+To reproduce the table, run both objectives for seeds 0, 1 and 2 with `--out results/<objective>_seed<seed>.json`. `python train.py --help` lists the hyperparameters.
 
-**What you'll see:**
-```
-Starting GRPO training
-  Dataset size: 10 problems
-  Epochs: 2
-  Samples per prompt: 4
+## Files
 
-Epoch 1/2 | Problem 5/10 | Batch Accuracy: 50.0%
-Epoch 1/2 | Problem 10/10 | Batch Accuracy: 75.0%
-
-Epoch 1 Complete - Accuracy: 62.5%
-
-...
-
-Problem 1: what is 15 + 8?
-Correct Answer: 23
-Model Responses:
-  1. 23 ✓
-  2. 23 ✓
-  3. 23 ✓
-```
-
-## Configuration
-
-Edit constants in [train.py](train.py):
-
-```python
-MAX_GENERATION_LENGTH = 20      # tokens per response
-TEMPERATURE = 0.7               # sampling randomness
-DEFAULT_LEARNING_RATE = 5e-5
-DEFAULT_NUM_SAMPLES = 4         # responses per prompt
-```
-
-Scale it up:
-```python
-problems = generate_arithmetic_problems(n=100)
-model = train_grpo(model, tokenizer, problems, num_epochs=5, num_samples=8)
-```
-
-## How It Works
-
-**1. Generate problems** ([data.py](data.py))
-```python
-problems = [
-    {"question": "what is 5 + 3?", "answer": "8"},
-    ...
-]
-```
-
-**2. Sample responses** ([train.py](train.py))
-
-For each problem, generate k responses while tracking log probs:
-```python
-for _ in range(num_samples):
-    response, log_prob = generate_with_log_probs(model, tokenizer, prompt)
-    responses.append(extract_answer(response, prompt))
-    log_probs.append(log_prob)
-```
-
-**3. Score them**
-```python
-rewards = compute_rewards(responses, correct_answer)
-# [1.0, 1.0, 0.0, 0.0] if 2/4 correct
-```
-
-**4. Calculate advantages**
-```python
-advantages = rewards - np.mean(rewards)
-# [0.5, 0.5, -0.5, -0.5]
-```
-
-**5. Update policy**
-```python
-loss = -Σ(advantage * log_prob) / k
-loss.backward()
-optimizer.step()
-```
-
-## Implementation Notes
-
-**Answer extraction:** The model sees `"Q: what is 5 + 3? A:"` and generates `" 8"` or `" the answer is 8"`. We strip the prompt and pull out the first number (regex handles negatives too).
-
-**Log probabilities:** We track the model's confidence in each generated token. This lets us adjust how strongly we push the model toward/away from this response.
-
-**Memory:** Explicitly delete tensors after each update to prevent buildup during training.
-
-## Why This Code
-
-This is written to be readable and educational:
-
-- Type hints throughout
-- Clear variable names (`num_samples` not `k`)
-- Comments explain the "why" not just the "what"
-- Proper logging instead of print statements
-- Clean structure that's easy to modify
-
-
-## Requirements
-
-- Python 3.8+
-- PyTorch 2.0+
-- Transformers 4.30+
-- ~2GB RAM (no GPU needed)
-
----
-
-Built as a learning project / portfolio piece.
+| File | Contents |
+| --- | --- |
+| `grpo.py` | The objective: advantages, clipped surrogate, KL estimator, and the REINFORCE baseline. |
+| `model.py` | Character tokenizer and the transformer, with attention written out. |
+| `data.py` | Problem generation and the fixed warm/train/test split. |
+| `train.py` | Warm start, rollouts, the RL loop and evaluation. |
+| `tests/test_grpo.py` | Unit tests for the objective. |
+| `results/` | One JSON history per run in the table. |
