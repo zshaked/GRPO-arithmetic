@@ -1,263 +1,203 @@
 """
-GRPO training for arithmetic tasks.
+GRPO on two-digit arithmetic, end to end on a CPU.
 
-Trains a language model to solve basic arithmetic using Group Relative Policy Optimization.
-GRPO works by generating multiple responses per prompt and comparing them - responses that
-do better than average get reinforced, worse ones get penalized.
+1. Warm start: supervised training of a small transformer on a small set of
+   solved problems, so the policy is right some of the time.
+2. RL: improve it on unseen problems using only a 0/1 reward, with either the
+   GRPO objective (grpo.py) or the REINFORCE baseline this repo used before.
+3. Report greedy exact-match accuracy on a held-out test set.
+
+    python train.py --objective grpo --seed 0
+    python train.py --objective reinforce --seed 0
 """
 
-from typing import List, Tuple, Dict
-import logging
-from dataclasses import dataclass
+import argparse
+import copy
+import json
+import random
+import time
+from pathlib import Path
 
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
 import torch
-import re
-import numpy as np
+import torch.nn.functional as F
 
-from data import generate_arithmetic_problems
-
-
-# Training Configuration Constants
-MAX_GENERATION_LENGTH = 20  # Keep responses short for arithmetic
-TEMPERATURE = 0.7  # Sampling temperature for generation
-DEFAULT_LEARNING_RATE = 5e-5
-DEFAULT_NUM_SAMPLES = 4  # Number of responses per prompt (the 'k' in GRPO)
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+from data import MAX_ANSWER_LEN, split_problems
+from grpo import GRPOConfig, group_advantages, grpo_loss, reinforce_loss
+from model import BOS, EOS, PAD, TinyTransformer, decode, encode
 
 
-@dataclass
-class TrainingMetrics:
-    """Simple container for tracking accuracy during training."""
-    epoch: int
-    total_correct: int
-    total_attempts: int
-
-    @property
-    def accuracy(self) -> float:
-        return (self.total_correct / self.total_attempts * 100) if self.total_attempts > 0 else 0.0
+def prompt_tensor(prompts: list[str]) -> torch.Tensor:
+    return torch.tensor([[BOS] + encode(p) for p in prompts])
 
 
-def extract_answer(response: str, prompt: str) -> str:
+def answer_tensor(answers: list[str]) -> torch.Tensor:
+    """Answers followed by EOS, right-padded with PAD to MAX_ANSWER_LEN."""
+    rows = []
+    for a in answers:
+        ids = encode(a) + [EOS]
+        rows.append(ids + [PAD] * (MAX_ANSWER_LEN - len(ids)))
+    return torch.tensor(rows)
+
+
+def token_logps(model: TinyTransformer, prompts: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    """log pi(tokens[:, t] | prompt, tokens[:, :t]) for every t. Shape (N, MAX_ANSWER_LEN)."""
+    logits = model(torch.cat([prompts, tokens[:, :-1]], dim=1))
+    logits = logits[:, prompts.size(1) - 1 :, :]  # positions that predict the completion
+    return torch.log_softmax(logits, dim=-1).gather(2, tokens.unsqueeze(2)).squeeze(2)
+
+
+@torch.no_grad()
+def sample(model: TinyTransformer, prompts: torch.Tensor, greedy: bool = False):
     """
-    Pull out the number from what the model generated.
+    Sample completions from the policy itself (temperature 1).
 
-    The response includes the original prompt, so we strip that out first.
-    Then we look for the first number (including negatives like -5).
+    Returns tokens (N, L), their log-probs (N, L), and a mask (N, L) that is 1.0
+    up to and including each completion's EOS. Tokens after EOS are PAD.
     """
-    generated_text = response[len(prompt):].strip()
-    numbers = re.findall(r"-?\d+", generated_text)
-    return numbers[0] if numbers else ""
+    n = prompts.size(0)
+    ids = prompts
+    alive = torch.ones(n, dtype=torch.bool)
+    tokens, logps, masks = [], [], []
+    for _ in range(MAX_ANSWER_LEN):
+        logp_all = torch.log_softmax(model(ids)[:, -1, :], dim=-1)
+        if greedy:
+            nxt = logp_all.argmax(dim=-1)
+        else:
+            nxt = torch.multinomial(logp_all.exp(), 1).squeeze(1)
+        nxt = torch.where(alive, nxt, torch.full_like(nxt, PAD))
+        tokens.append(nxt)
+        logps.append(logp_all.gather(1, nxt.unsqueeze(1)).squeeze(1))
+        masks.append(alive.float())
+        alive = alive & (nxt != EOS)
+        ids = torch.cat([ids, nxt.unsqueeze(1)], dim=1)
+    return torch.stack(tokens, 1), torch.stack(logps, 1), torch.stack(masks, 1)
 
 
-def compute_rewards(responses: List[str], correct_answer: str) -> np.ndarray:
-    """Check which responses are correct. Returns 1.0 for right, 0.0 for wrong."""
-    return (np.array(responses) == correct_answer).astype(float)
+def score(tokens: torch.Tensor, answers: list[str]) -> torch.Tensor:
+    """1.0 for an exact-match answer that is terminated by EOS, else 0.0."""
+    rewards = []
+    for row, answer in zip(tokens.tolist(), answers):
+        rewards.append(1.0 if EOS in row and decode(row) == answer else 0.0)
+    return torch.tensor(rewards)
 
 
-def compute_advantages(rewards: np.ndarray) -> np.ndarray:
-    """
-    Mean-center the rewards to get advantages.
-
-    This is how GRPO works - instead of caring about absolute scores, we compare
-    responses within each group. Anything above average gets a positive advantage
-    (we want more of this), below average gets negative (less of this).
-    """
-    return rewards - np.mean(rewards)
-
-
-def generate_with_log_probs(
-    model: GPT2LMHeadModel,
-    tokenizer: GPT2Tokenizer,
-    prompt: str,
-    max_length: int = MAX_GENERATION_LENGTH,
-    temperature: float = TEMPERATURE
-) -> Tuple[str, torch.Tensor]:
-    """
-    Generate text while keeping track of log probabilities.
-
-    We need the log probs for the policy gradient update. Basically, for each token
-    the model generates, we record how confident it was. Later we'll use this to
-    make the model more confident in good responses and less confident in bad ones.
-    """
-    input_ids = tokenizer.encode(prompt, return_tensors='pt')
-    generated_ids = input_ids.clone()
-    log_probs = []
-
-    for _ in range(max_length):
-        outputs = model(generated_ids)
-        next_token_logits = outputs.logits[:, -1, :]
-        probs = torch.softmax(next_token_logits / temperature, dim=-1)
-
-        next_token_id = torch.multinomial(probs, num_samples=1)
-        log_probs.append(torch.log(probs[0, next_token_id]))
-
-        generated_ids = torch.cat([generated_ids, next_token_id], dim=1)
-
-        if next_token_id.item() == tokenizer.eos_token_id:
-            break
-
-    response = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    total_log_prob = torch.stack(log_probs).sum() if log_probs else torch.tensor(0.0, requires_grad=True)
-
-    return response, total_log_prob
-
-
-def train_grpo(
-    model: GPT2LMHeadModel,
-    tokenizer: GPT2Tokenizer,
-    problems: List[Dict[str, str]],
-    num_epochs: int = 2,
-    num_samples: int = DEFAULT_NUM_SAMPLES,
-    learning_rate: float = DEFAULT_LEARNING_RATE
-) -> GPT2LMHeadModel:
-    """
-    Train using GRPO - Group Relative Policy Optimization.
-
-    For each problem, we generate multiple responses and score them. Then we update
-    the model to make better-than-average responses more likely and worse ones less
-    likely. It's simpler than PPO because we don't need a value network or clipping,
-    just relative comparisons.
-    """
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-    logger.info(f"Starting GRPO training")
-    logger.info(f"  Dataset size: {len(problems)} problems")
-    logger.info(f"  Epochs: {num_epochs}")
-    logger.info(f"  Samples per prompt: {num_samples}")
-    logger.info(f"  Learning rate: {learning_rate}\n")
-
-    for epoch in range(num_epochs):
-        metrics = TrainingMetrics(epoch=epoch + 1, total_correct=0, total_attempts=0)
-
-        for problem_idx, problem in enumerate(problems):
-            prompt = f"Q: {problem['question']} A:"
-            correct_answer = problem['answer']
-
-            # Sample multiple responses for this problem
-            responses = []
-            log_probs = []
-
-            for _ in range(num_samples):
-                response, log_prob = generate_with_log_probs(
-                    model, tokenizer, prompt, max_length=MAX_GENERATION_LENGTH
-                )
-                answer = extract_answer(response, prompt)
-                responses.append(answer)
-                log_probs.append(log_prob)
-
-            # Score and compare
-            rewards = compute_rewards(responses, correct_answer)
-            advantages = compute_advantages(rewards)
-
-            # Policy gradient: push up good responses, push down bad ones
-            loss = sum(-adv * lp for adv, lp in zip(advantages, log_probs)) / len(log_probs)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            metrics.total_correct += int(rewards.sum())
-            metrics.total_attempts += len(rewards)
-
-            del loss, log_probs  # cleanup to avoid memory buildup
-
-            if (problem_idx + 1) % 5 == 0:
-                batch_accuracy = rewards.sum() / len(rewards) * 100
-                logger.info(
-                    f"Epoch {epoch + 1}/{num_epochs} | "
-                    f"Problem {problem_idx + 1}/{len(problems)} | "
-                    f"Batch Accuracy: {batch_accuracy:.1f}%"
-                )
-
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Epoch {metrics.epoch} Complete - Accuracy: {metrics.accuracy:.1f}%")
-        logger.info(f"{'='*60}\n")
-
-    return model
-
-
-def demonstrate_model(
-    model: GPT2LMHeadModel,
-    tokenizer: GPT2Tokenizer,
-    problems: List[Dict[str, str]],
-    num_examples: int = 3
-) -> None:
-    """Show how the trained model performs on a few problems."""
-    logger.info("\n" + "="*60)
-    logger.info("MODEL DEMONSTRATION")
-    logger.info("="*60 + "\n")
-
+def evaluate(model: TinyTransformer, problems: list) -> float:
     model.eval()
-
-    with torch.no_grad():
-        for i in range(min(num_examples, len(problems))):
-            problem = problems[i]
-            question = problem['question']
-            correct_answer = problem['answer']
-            prompt = f"Q: {question} A:"
-
-            logger.info(f"Problem {i + 1}: {question}")
-            logger.info(f"Correct Answer: {correct_answer}")
-            logger.info("Model Responses:")
-
-            for response_num in range(3):
-                response, _ = generate_with_log_probs(
-                    model, tokenizer, prompt, max_length=MAX_GENERATION_LENGTH
-                )
-                answer = extract_answer(response, prompt)
-                is_correct = "✓" if answer == correct_answer else "✗"
-                logger.info(f"  {response_num + 1}. {answer} {is_correct}")
-
-            logger.info("")
-
+    prompts = prompt_tensor([p for p, _ in problems])
+    tokens, _, _ = sample(model, prompts, greedy=True)
     model.train()
+    return score(tokens, [a for _, a in problems]).mean().item()
+
+
+def warm_start(model: TinyTransformer, warm: list, steps: int, lr: float, rng: random.Random) -> None:
+    """Supervised cross-entropy on the answer tokens of the warm set."""
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    for _ in range(steps):
+        batch = rng.sample(warm, 128)
+        prompts = prompt_tensor([p for p, _ in batch])
+        answers = answer_tensor([a for _, a in batch])
+        logits = model(torch.cat([prompts, answers[:, :-1]], dim=1))[:, prompts.size(1) - 1 :, :]
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), answers.reshape(-1), ignore_index=PAD)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+
+def run(args: argparse.Namespace) -> dict:
+    torch.manual_seed(args.seed)
+    rng = random.Random(args.seed)
+    warm, train, test = split_problems(n_warm=args.warm_size)
+
+    model = TinyTransformer()
+    warm_start(model, warm, args.warm_steps, args.warm_lr, rng)
+
+    reference = copy.deepcopy(model).eval()  # frozen pi_ref for the KL penalty
+    for p in reference.parameters():
+        p.requires_grad_(False)
+
+    cfg = GRPOConfig(clip_eps=args.clip_eps, kl_beta=args.kl_beta)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    history = [{"iter": 0, "test_acc": evaluate(model, test)}]
+    print(f"[{args.objective} seed {args.seed}] after warm start: test acc {history[0]['test_acc']:.3f}")
+
+    start = time.time()
+    for it in range(1, args.iters + 1):
+        batch = rng.sample(train, args.prompts)
+        # Each prompt repeated G times: rows [i*G, (i+1)*G) are prompt i's group.
+        prompts = prompt_tensor([p for p, _ in batch]).repeat_interleave(args.group_size, dim=0)
+        answers = [a for _, a in batch for _ in range(args.group_size)]
+
+        tokens, logp_old, mask = sample(model, prompts)
+        rewards = score(tokens, answers).view(args.prompts, args.group_size)
+
+        if args.objective == "grpo":
+            adv = group_advantages(rewards, cfg.normalize_std, cfg.adv_eps).reshape(-1)
+            with torch.no_grad():
+                logp_ref = token_logps(reference, prompts, tokens)
+            # Several gradient steps on the same rollouts. After the first step
+            # pi_theta != pi_old, which is what the ratio and the clip are for.
+            for _ in range(args.update_epochs):
+                loss, stats = grpo_loss(
+                    token_logps(model, prompts, tokens), logp_old, logp_ref, adv, mask, cfg
+                )
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+        else:
+            loss = reinforce_loss(token_logps(model, prompts, tokens), rewards, mask)
+            stats = {}
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+        if it % args.eval_every == 0 or it == args.iters:
+            # A group with identical rewards has zero advantage and teaches nothing.
+            informative = (rewards.std(dim=1) > 0).float().mean().item()
+            row = {
+                "iter": it,
+                "test_acc": evaluate(model, test),
+                "sample_acc": rewards.mean().item(),
+                "informative_groups": informative,
+                **stats,
+            }
+            history.append(row)
+            extra = "".join(f"  {k} {v:.3f}" for k, v in stats.items())
+            print(
+                f"[{args.objective} seed {args.seed}] iter {it:4d}  test acc {row['test_acc']:.3f}  "
+                f"sample acc {row['sample_acc']:.3f}  informative {informative:.2f}{extra}"
+            )
+
+    result = {
+        "config": vars(args),
+        "history": history,
+        "seconds": round(time.time() - start, 1),
+    }
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(result, indent=2))
+    return result
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--objective", choices=["grpo", "reinforce"], default="grpo")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--iters", type=int, default=400, help="RL iterations")
+    p.add_argument("--prompts", type=int, default=64, help="prompts per iteration")
+    p.add_argument("--group-size", type=int, default=8, help="completions per prompt (G)")
+    p.add_argument("--update-epochs", type=int, default=4, help="gradient steps per batch of rollouts (GRPO)")
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--clip-eps", type=float, default=0.2)
+    p.add_argument("--kl-beta", type=float, default=0.04)
+    p.add_argument("--warm-size", type=int, default=1500, help="solved problems seen by the warm start")
+    p.add_argument("--warm-steps", type=int, default=600)
+    p.add_argument("--warm-lr", type=float, default=1e-3)
+    p.add_argument("--eval-every", type=int, default=25)
+    p.add_argument("--out", type=str, default="", help="write the run's history to this JSON file")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    logger.info("="*60)
-    logger.info("GRPO Training: Teaching GPT-2 Basic Arithmetic")
-    logger.info("="*60 + "\n")
-
-    logger.info("Loading DistilGPT-2 model...")
-    model = GPT2LMHeadModel.from_pretrained('distilgpt2')
-    tokenizer = GPT2Tokenizer.from_pretrained('distilgpt2')
-    tokenizer.pad_token = tokenizer.eos_token
-    logger.info("Model loaded\n")
-
-    logger.info("Generating arithmetic problems...")
-    problems = generate_arithmetic_problems(n=10)
-    logger.info(f"Generated {len(problems)} problems\n")
-
-    logger.info("Sample problems:")
-    for i, p in enumerate(problems[:3]):
-        logger.info(f"  {i + 1}. {p['question']} = {p['answer']}")
-    logger.info("")
-
-    trained_model = train_grpo(
-        model=model,
-        tokenizer=tokenizer,
-        problems=problems,
-        num_epochs=2,
-        num_samples=4,
-        learning_rate=5e-5
-    )
-
-    demonstrate_model(trained_model, tokenizer, problems)
-
-    output_dir = './grpo_model'
-    logger.info(f"Saving model to {output_dir}...")
-    trained_model.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    logger.info("Saved!\n")
-
-    logger.info("="*60)
-    logger.info("Training Complete!")
-    logger.info("="*60)
+    run(parse_args())

@@ -1,0 +1,169 @@
+{
+  "config": {
+    "objective": "grpo",
+    "seed": 1,
+    "iters": 400,
+    "prompts": 64,
+    "group_size": 8,
+    "update_epochs": 4,
+    "lr": 0.0001,
+    "clip_eps": 0.2,
+    "kl_beta": 0.04,
+    "warm_size": 1500,
+    "warm_steps": 600,
+    "warm_lr": 0.001,
+    "eval_every": 25,
+    "out": "results/grpo_seed1.json"
+  },
+  "history": [
+    {
+      "iter": 0,
+      "test_acc": 0.11349999904632568
+    },
+    {
+      "iter": 25,
+      "test_acc": 0.13750000298023224,
+      "sample_acc": 0.1953125,
+      "informative_groups": 0.265625,
+      "kl": 0.12178922444581985,
+      "clip_frac": 0.0708976536989212,
+      "ratio_mean": 1.0035923719406128
+    },
+    {
+      "iter": 50,
+      "test_acc": 0.14249999821186066,
+      "sample_acc": 0.140625,
+      "informative_groups": 0.21875,
+      "kl": 0.26898694038391113,
+      "clip_frac": 0.05266237631440163,
+      "ratio_mean": 0.9969115853309631
+    },
+    {
+      "iter": 75,
+      "test_acc": 0.15150000154972076,
+      "sample_acc": 0.1640625,
+      "informative_groups": 0.3125,
+      "kl": 0.32441246509552,
+      "clip_frac": 0.07522624731063843,
+      "ratio_mean": 1.0550146102905273
+    },
+    {
+      "iter": 100,
+      "test_acc": 0.15950000286102295,
+      "sample_acc": 0.1640625,
+      "informative_groups": 0.234375,
+      "kl": 0.2270648032426834,
+      "clip_frac": 0.054069437086582184,
+      "ratio_mean": 0.9993913173675537
+    },
+    {
+      "iter": 125,
+      "test_acc": 0.1655000001192093,
+      "sample_acc": 0.12890625,
+      "informative_groups": 0.3125,
+      "kl": 0.39319419860839844,
+      "clip_frac": 0.07673569023609161,
+      "ratio_mean": 1.000584602355957
+    },
+    {
+      "iter": 150,
+      "test_acc": 0.17800000309944153,
+      "sample_acc": 0.216796875,
+      "informative_groups": 0.28125,
+      "kl": 0.3866219222545624,
+      "clip_frac": 0.06670567393302917,
+      "ratio_mean": 0.9965875148773193
+    },
+    {
+      "iter": 175,
+      "test_acc": 0.19550000131130219,
+      "sample_acc": 0.19921875,
+      "informative_groups": 0.375,
+      "kl": 0.43126925826072693,
+      "clip_frac": 0.10972142964601517,
+      "ratio_mean": 1.000134825706482
+    },
+    {
+      "iter": 200,
+      "test_acc": 0.20649999380111694,
+      "sample_acc": 0.16796875,
+      "informative_groups": 0.28125,
+      "kl": 0.35010895133018494,
+      "clip_frac": 0.08837209641933441,
+      "ratio_mean": 1.0009208917617798
+    },
+    {
+      "iter": 225,
+      "test_acc": 0.20999999344348907,
+      "sample_acc": 0.197265625,
+      "informative_groups": 0.28125,
+      "kl": 0.4886314868927002,
+      "clip_frac": 0.08981001377105713,
+      "ratio_mean": 1.0006612539291382
+    },
+    {
+      "iter": 250,
+      "test_acc": 0.22200000286102295,
+      "sample_acc": 0.16796875,
+      "informative_groups": 0.28125,
+      "kl": 0.3931971788406372,
+      "clip_frac": 0.10035211592912674,
+      "ratio_mean": 1.002994179725647
+    },
+    {
+      "iter": 275,
+      "test_acc": 0.2329999953508377,
+      "sample_acc": 0.275390625,
+      "informative_groups": 0.40625,
+      "kl": 0.40701374411582947,
+      "clip_frac": 0.08138873428106308,
+      "ratio_mean": 1.001038908958435
+    },
+    {
+      "iter": 300,
+      "test_acc": 0.25600001215934753,
+      "sample_acc": 0.185546875,
+      "informative_groups": 0.265625,
+      "kl": 0.501945972442627,
+      "clip_frac": 0.06357388198375702,
+      "ratio_mean": 0.9998623132705688
+    },
+    {
+      "iter": 325,
+      "test_acc": 0.2775000035762787,
+      "sample_acc": 0.318359375,
+      "informative_groups": 0.390625,
+      "kl": 0.6011751890182495,
+      "clip_frac": 0.06457046419382095,
+      "ratio_mean": 1.004652500152588
+    },
+    {
+      "iter": 350,
+      "test_acc": 0.29649999737739563,
+      "sample_acc": 0.228515625,
+      "informative_groups": 0.3125,
+      "kl": 0.586422324180603,
+      "clip_frac": 0.0710631012916565,
+      "ratio_mean": 0.9958897233009338
+    },
+    {
+      "iter": 375,
+      "test_acc": 0.32499998807907104,
+      "sample_acc": 0.310546875,
+      "informative_groups": 0.4375,
+      "kl": 0.698214054107666,
+      "clip_frac": 0.08707865327596664,
+      "ratio_mean": 0.997829794883728
+    },
+    {
+      "iter": 400,
+      "test_acc": 0.34049999713897705,
+      "sample_acc": 0.34375,
+      "informative_groups": 0.421875,
+      "kl": 0.6320695281028748,
+      "clip_frac": 0.06843891739845276,
+      "ratio_mean": 0.9944762587547302
+    }
+  ],
+  "seconds": 369.7
+}

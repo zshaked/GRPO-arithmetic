@@ -1,0 +1,121 @@
+{
+  "config": {
+    "objective": "reinforce",
+    "seed": 0,
+    "iters": 400,
+    "prompts": 64,
+    "group_size": 8,
+    "update_epochs": 4,
+    "lr": 0.0001,
+    "clip_eps": 0.2,
+    "kl_beta": 0.04,
+    "warm_size": 1500,
+    "warm_steps": 600,
+    "warm_lr": 0.001,
+    "eval_every": 25,
+    "out": "results/reinforce_seed0.json"
+  },
+  "history": [
+    {
+      "iter": 0,
+      "test_acc": 0.2759999930858612
+    },
+    {
+      "iter": 25,
+      "test_acc": 0.3140000104904175,
+      "sample_acc": 0.29296875,
+      "informative_groups": 0.375
+    },
+    {
+      "iter": 50,
+      "test_acc": 0.3499999940395355,
+      "sample_acc": 0.244140625,
+      "informative_groups": 0.34375
+    },
+    {
+      "iter": 75,
+      "test_acc": 0.38449999690055847,
+      "sample_acc": 0.40625,
+      "informative_groups": 0.5625
+    },
+    {
+      "iter": 100,
+      "test_acc": 0.3869999945163727,
+      "sample_acc": 0.302734375,
+      "informative_groups": 0.5
+    },
+    {
+      "iter": 125,
+      "test_acc": 0.414000004529953,
+      "sample_acc": 0.416015625,
+      "informative_groups": 0.515625
+    },
+    {
+      "iter": 150,
+      "test_acc": 0.4339999854564667,
+      "sample_acc": 0.384765625,
+      "informative_groups": 0.53125
+    },
+    {
+      "iter": 175,
+      "test_acc": 0.44600000977516174,
+      "sample_acc": 0.3359375,
+      "informative_groups": 0.5
+    },
+    {
+      "iter": 200,
+      "test_acc": 0.45350000262260437,
+      "sample_acc": 0.392578125,
+      "informative_groups": 0.625
+    },
+    {
+      "iter": 225,
+      "test_acc": 0.47999998927116394,
+      "sample_acc": 0.310546875,
+      "informative_groups": 0.53125
+    },
+    {
+      "iter": 250,
+      "test_acc": 0.49399998784065247,
+      "sample_acc": 0.470703125,
+      "informative_groups": 0.4375
+    },
+    {
+      "iter": 275,
+      "test_acc": 0.49549999833106995,
+      "sample_acc": 0.4140625,
+      "informative_groups": 0.453125
+    },
+    {
+      "iter": 300,
+      "test_acc": 0.5080000162124634,
+      "sample_acc": 0.505859375,
+      "informative_groups": 0.515625
+    },
+    {
+      "iter": 325,
+      "test_acc": 0.5145000219345093,
+      "sample_acc": 0.41796875,
+      "informative_groups": 0.515625
+    },
+    {
+      "iter": 350,
+      "test_acc": 0.5249999761581421,
+      "sample_acc": 0.49609375,
+      "informative_groups": 0.421875
+    },
+    {
+      "iter": 375,
+      "test_acc": 0.5444999933242798,
+      "sample_acc": 0.44140625,
+      "informative_groups": 0.484375
+    },
+    {
+      "iter": 400,
+      "test_acc": 0.5425000190734863,
+      "sample_acc": 0.466796875,
+      "informative_groups": 0.328125
+    }
+  ],
+  "seconds": 162.6
+}
